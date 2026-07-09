@@ -12,7 +12,8 @@ pagina = st.sidebar.radio("Selecione a Página", [
     "Dashboard Principal", 
     "Análise de Custos Detalhada", 
     "Gestão de Pagamentos (Baixas)",
-    "Adicionar / Importar Dados" # Nova página
+    "Relatório Analítico (Mensal/Anual)", # Nova Página Analítica
+    "Adicionar / Importar Dados" 
 ])
 st.sidebar.divider()
 orcamento_mensal = st.sidebar.number_input("Orçamento Mensal Estipulado (R$)", value=450000.0, step=1000.0)
@@ -21,7 +22,6 @@ orcamento_mensal = st.sidebar.number_input("Orçamento Mensal Estipulado (R$)", 
 @st.cache_data
 def carregar_e_tratar_csv(file):
     try:
-        # Se for string (caminho do arquivo inicial) ou arquivo upado
         if isinstance(file, str):
             df = pd.read_csv(file, encoding='utf-16-le', sep=';', skiprows=1, on_bad_lines='skip', engine='python')
         else:
@@ -37,9 +37,15 @@ def carregar_e_tratar_csv(file):
         if 'Situação pagamento documento' in df.columns:
             df['Situação pagamento documento'] = df['Situação pagamento documento'].fillna('Em Aberto')
             
-        # Garante que o código do documento seja string para evitar erros de cruzamento de dados
         if 'Código documento' in df.columns:
             df['Código documento'] = df['Código documento'].astype(str)
+            
+        # Extração de Mês e Ano para a página Analítica
+        if 'Data vencimento' in df.columns:
+            # Tenta converter a data de vencimento para pegar o mês e o ano
+            data_dt = pd.to_datetime(df['Data vencimento'], format='%d/%m/%Y', errors='coerce')
+            df['Ano'] = data_dt.dt.year.fillna(datetime.datetime.now().year).astype(int)
+            df['Mês'] = data_dt.dt.month.fillna(datetime.datetime.now().month).astype(int)
             
         return df
     except Exception as e:
@@ -57,7 +63,7 @@ if not df.empty:
     total_pago = df['Valor pago'].sum()
     saldo_pendente = total_doc - total_pago
     
-    # Função para formatar moeda no padrão brasileiro
+    # Função global para formatar moeda
     def formatar_moeda(valor):
         return f"R$ {valor:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
 
@@ -72,7 +78,7 @@ if not df.empty:
         else:
             st.success(f"✅ Orçamento sob controle. Disponível: {formatar_moeda(orcamento_mensal - total_doc)}")
             
-        st.header("Resumo Financeiro (Mês Atual)")
+        st.header("Resumo Financeiro (Geral)")
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Total Lançado", formatar_moeda(total_doc))
@@ -116,17 +122,23 @@ if not df.empty:
         st.title("💸 Gestão de Pagamentos")
         st.markdown("Altere a **Situação** (dê dois cliques na célula). Quando marcar como 'Pago', o sistema calculará o valor automaticamente.")
         
-        colunas_exibicao = ['Código documento', 'Fornecedor', 'PlanoConta', 'Data vencimento', 'Valor documento', 'Situação pagamento documento']
-        colunas_disponiveis = [c for c in colunas_exibicao if c in df.columns]
+        colunas_exibicao = ['Código documento', 'Fornecedor', 'PlanoConta', 'Data vencimento', 'Valor Visual', 'Situação pagamento documento']
+        
+        # Cópia para exibição formatada
+        df_exibicao = df.copy()
+        if 'Valor documento' in df_exibicao.columns:
+            df_exibicao['Valor Visual'] = df_exibicao['Valor documento'].apply(formatar_moeda)
+        
+        colunas_disponiveis = [c for c in colunas_exibicao if c in df_exibicao.columns]
         
         with st.form("form_edicao"):
             df_editado = st.data_editor(
-                df[colunas_disponiveis],
+                df_exibicao[colunas_disponiveis],
                 column_config={
                     "Situação pagamento documento": st.column_config.SelectboxColumn("Situação", options=["Em Aberto", "Pago", "Cancelado", "Atrasado"], required=True),
-                    "Valor documento": st.column_config.NumberColumn("Valor do Título", format="R$ %.2f")
+                    "Valor Visual": st.column_config.TextColumn("Valor do Título (R$)") 
                 },
-                disabled=["Código documento", "Fornecedor", "PlanoConta", "Data vencimento", "Valor documento"],
+                disabled=["Código documento", "Fornecedor", "PlanoConta", "Data vencimento", "Valor Visual"],
                 use_container_width=True, hide_index=True, height=400
             )
             salvar = st.form_submit_button("💾 Salvar Alterações e Recalcular")
@@ -141,24 +153,74 @@ if not df.empty:
 
         st.divider()
         st.subheader("Exportar Dados Consolidados")
-        csv_export = df.to_csv(sep=';', index=False, encoding='utf-16-le').encode('utf-16-le')
+        csv_export = df.drop(columns=['Ano', 'Mês'], errors='ignore').to_csv(sep=';', index=False, encoding='utf-16-le').encode('utf-16-le')
         st.download_button("📥 Baixar Planilha Atualizada", data=csv_export, file_name='RelatorioCAP_Atualizado.csv', mime='text/csv')
 
     # ==========================================
-    # PÁGINA 4: ADICIONAR / IMPORTAR DADOS (NOVA)
+    # PÁGINA 4: RELATÓRIO ANALÍTICO (NOVA)
+    # ==========================================
+    elif pagina == "Relatório Analítico (Mensal/Anual)":
+        st.title("📅 Relatório Analítico de Lançamentos")
+        st.markdown("Filtre os dados por período para avaliar as contas e visualizar as informações completas.")
+        
+        meses_nomes = {1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho', 7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'}
+        
+        col_filtro1, col_filtro2, col_filtro3 = st.columns(3)
+        
+        anos_disponiveis = sorted(df['Ano'].dropna().unique().tolist())
+        ano_selecionado = col_filtro1.selectbox("Selecione o Ano", ["Todos"] + anos_disponiveis)
+        
+        meses_disponiveis = sorted(df['Mês'].dropna().unique().tolist())
+        meses_opcoes = ["Todos"] + [meses_nomes.get(m, str(m)) for m in meses_disponiveis]
+        mes_selecionado = col_filtro2.selectbox("Selecione o Mês", meses_opcoes)
+        
+        situacao_selecionada = col_filtro3.selectbox("Filtro de Situação", ["Apenas Pagos", "Apenas Em Aberto", "Todos os Lançamentos"])
+        
+        # Lógica de Filtragem
+        df_filtrado = df.copy()
+        
+        if ano_selecionado != "Todos":
+            df_filtrado = df_filtrado[df_filtrado['Ano'] == ano_selecionado]
+            
+        if mes_selecionado != "Todos":
+            mes_numero = [k for k, v in meses_nomes.items() if v == mes_selecionado][0]
+            df_filtrado = df_filtrado[df_filtrado['Mês'] == mes_numero]
+            
+        if situacao_selecionada == "Apenas Pagos":
+            df_filtrado = df_filtrado[df_filtrado['Situação pagamento documento'] == 'Pago']
+        elif situacao_selecionada == "Apenas Em Aberto":
+            df_filtrado = df_filtrado[df_filtrado['Situação pagamento documento'] == 'Em Aberto']
+            
+        st.divider()
+        st.subheader(f"Resultados do Período ({len(df_filtrado)} lançamentos encontrados)")
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Valor Total Lançado (Período)", formatar_moeda(df_filtrado['Valor documento'].sum()))
+        c2.metric("Valor Efetivamente Pago (Período)", formatar_moeda(df_filtrado['Valor pago'].sum()))
+        c3.metric("Saldo Pendente (Período)", formatar_moeda(df_filtrado['Valor documento'].sum() - df_filtrado['Valor pago'].sum()))
+        
+        st.markdown("### 📋 Dados Analíticos Detalhados")
+        df_exibicao_analitico = df_filtrado.copy()
+        df_exibicao_analitico['Valor documento'] = df_exibicao_analitico['Valor documento'].apply(formatar_moeda)
+        df_exibicao_analitico['Valor pago'] = df_exibicao_analitico['Valor pago'].apply(formatar_moeda)
+        
+        colunas_analiticas = ['Código documento', 'Fornecedor', 'PlanoConta', 'Data vencimento', 'Valor documento', 'Valor pago', 'Situação pagamento documento']
+        colunas_exibir = [c for c in colunas_analiticas if c in df_exibicao_analitico.columns]
+        
+        st.dataframe(df_exibicao_analitico[colunas_exibir], use_container_width=True, hide_index=True)
+
+    # ==========================================
+    # PÁGINA 5: ADICIONAR / IMPORTAR DADOS
     # ==========================================
     elif pagina == "Adicionar / Importar Dados":
         st.title("➕ Alimentar Sistema")
         
         st.subheader("1. Importação Automática (Planilha CSV)")
-        st.markdown("Faça o upload de um novo relatório extraído do sistema. O aplicativo cruzará o **Código documento** e adicionará apenas os lançamentos que ainda não existem aqui.")
-        
         arquivo_upload = st.file_uploader("Arraste ou escolha o arquivo CSV", type=['csv'])
         
         if arquivo_upload is not None:
             df_novo = carregar_e_tratar_csv(arquivo_upload)
             if not df_novo.empty:
-                # Lógica Anti-Duplicidade (Filtra apenas os códigos que NÃO estão no banco de dados atual)
                 codigos_existentes = df['Código documento'].tolist()
                 df_filtrado = df_novo[~df_novo['Código documento'].isin(codigos_existentes)]
                 
@@ -166,7 +228,6 @@ if not df.empty:
                 if qtd_novos > 0:
                     st.success(f"✅ Foram encontrados {qtd_novos} novos lançamentos! Clique abaixo para integrar.")
                     if st.button("Integrar Novos Lançamentos ao Sistema"):
-                        # Adiciona os novos no final do dataframe atual
                         df = pd.concat([df, df_filtrado], ignore_index=True)
                         st.session_state['df_dados'] = df
                         st.success("Banco de dados atualizado com sucesso! Vá para o Dashboard para ver os novos números.")
@@ -175,7 +236,6 @@ if not df.empty:
                     st.info("ℹ️ Nenhum lançamento novo encontrado. Todos os registros deste arquivo já estão no sistema.")
 
         st.divider()
-        
         st.subheader("2. Inclusão Manual (Lançamento Avulso)")
         with st.form("form_manual"):
             col_a, col_b = st.columns(2)
@@ -183,7 +243,7 @@ if not df.empty:
             fornecedor = col_b.text_input("Fornecedor / Favorecido")
             
             col_c, col_d = st.columns(2)
-            lista_contas = df['PlanoConta'].dropna().unique().tolist()
+            lista_contas = df['PlanoConta'].dropna().unique().tolist() if 'PlanoConta' in df.columns else []
             plano_conta = col_c.selectbox("Plano de Contas", lista_contas)
             valor_novo = col_d.number_input("Valor da Despesa (R$)", min_value=0.0, format="%.2f")
             
@@ -206,9 +266,10 @@ if not df.empty:
                         'Valor documento': valor_novo,
                         'Valor pago': valor_novo if situacao == 'Pago' else 0.0,
                         'Data vencimento': data_venc.strftime('%d/%m/%Y'),
-                        'Situação pagamento documento': situacao
+                        'Situação pagamento documento': situacao,
+                        'Ano': data_venc.year,
+                        'Mês': data_venc.month
                     }])
-                    # Concatena o novo registro com as colunas vazias preenchidas com NaN
                     df = pd.concat([df, novo_registro], ignore_index=True)
                     st.session_state['df_dados'] = df
                     st.success(f"✅ Lançamento de {formatar_moeda(valor_novo)} para {fornecedor} inserido com sucesso!")
