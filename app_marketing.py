@@ -28,13 +28,13 @@ orcamento_padrao = st.sidebar.number_input("Orçamento Padrão (R$)", value=4500
 # ==========================================
 # 2. CONEXÃO COM O GOOGLE SHEETS
 # ==========================================
-# Força o aplicativo a ler o JSON do robô corretamente
 try:
     url_planilha = st.secrets["spreadsheet_url"]
     credenciais = json.loads(st.secrets["google_json"])
-    conn = st.connection("gsheets", type=GSheetsConnection, **credenciais)
+    # CORREÇÃO APLICADA AQUI: usando service_account_info para evitar conflito da palavra 'type'
+    conn = st.connection("gsheets", type=GSheetsConnection, service_account_info=credenciais)
 except Exception as e:
-    st.error(f"Erro ao ler as credenciais no Streamlit Secrets. Verifique a formatação. Detalhe: {e}")
+    st.error(f"Erro ao conectar com as credenciais. Detalhe: {e}")
     st.stop()
 
 @st.cache_data(ttl=30)
