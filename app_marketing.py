@@ -12,20 +12,20 @@ pagina = st.sidebar.radio("Selecione a Página", [
     "Dashboard Principal", 
     "Análise de Custos Detalhada", 
     "Gestão de Pagamentos (Baixas)",
-    "Relatório Analítico (Mensal/Anual)", # Nova Página Analítica
+    "Relatório Analítico (Mensal/Anual)", 
     "Adicionar / Importar Dados" 
 ])
 st.sidebar.divider()
 orcamento_mensal = st.sidebar.number_input("Orçamento Mensal Estipulado (R$)", value=450000.0, step=1000.0)
 
+# Status Reais Extraídos da sua Planilha
+STATUS_ORIGINAIS = ["A PAGAR", "BAIXA AUTOMÁTICA", "BAIXA MANUAL"]
+
 # 2. Função de Carregamento e Tratamento
 @st.cache_data
 def carregar_e_tratar_csv(file):
     try:
-        if isinstance(file, str):
-            df = pd.read_csv(file, encoding='utf-16-le', sep=';', skiprows=1, on_bad_lines='skip', engine='python')
-        else:
-            df = pd.read_csv(file, encoding='utf-16-le', sep=';', skiprows=1, on_bad_lines='skip', engine='python')
+        df = pd.read_csv(file, encoding='utf-16-le', sep=';', skiprows=1, on_bad_lines='skip', engine='python')
             
         for col in ['Valor documento', 'Valor pago']:
             if col in df.columns:
@@ -35,14 +35,13 @@ def carregar_e_tratar_csv(file):
                                              .astype(float)
         
         if 'Situação pagamento documento' in df.columns:
-            df['Situação pagamento documento'] = df['Situação pagamento documento'].fillna('Em Aberto')
+            # Se vier vazio, assume que é "A PAGAR"
+            df['Situação pagamento documento'] = df['Situação pagamento documento'].fillna('A PAGAR')
             
         if 'Código documento' in df.columns:
             df['Código documento'] = df['Código documento'].astype(str)
             
-        # Extração de Mês e Ano para a página Analítica
         if 'Data vencimento' in df.columns:
-            # Tenta converter a data de vencimento para pegar o mês e o ano
             data_dt = pd.to_datetime(df['Data vencimento'], format='%d/%m/%Y', errors='coerce')
             df['Ano'] = data_dt.dt.year.fillna(datetime.datetime.now().year).astype(int)
             df['Mês'] = data_dt.dt.month.fillna(datetime.datetime.now().month).astype(int)
@@ -59,11 +58,19 @@ if 'df_dados' not in st.session_state:
 df = st.session_state['df_dados']
 
 if not df.empty:
+    
+    # Trava de Segurança Geral (Garante que Ano e Mês existam caso venham de cache antigo)
+    if 'Ano' not in df.columns or 'Mês' not in df.columns:
+        if 'Data vencimento' in df.columns:
+            data_dt = pd.to_datetime(df['Data vencimento'], format='%d/%m/%Y', errors='coerce')
+            df['Ano'] = data_dt.dt.year.fillna(datetime.datetime.now().year).astype(int)
+            df['Mês'] = data_dt.dt.month.fillna(datetime.datetime.now().month).astype(int)
+            st.session_state['df_dados'] = df
+
     total_doc = df['Valor documento'].sum()
     total_pago = df['Valor pago'].sum()
     saldo_pendente = total_doc - total_pago
     
-    # Função global para formatar moeda
     def formatar_moeda(valor):
         return f"R$ {valor:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
 
@@ -120,11 +127,10 @@ if not df.empty:
     # ==========================================
     elif pagina == "Gestão de Pagamentos (Baixas)":
         st.title("💸 Gestão de Pagamentos")
-        st.markdown("Altere a **Situação** (dê dois cliques na célula). Quando marcar como 'Pago', o sistema calculará o valor automaticamente.")
+        st.markdown("Altere a **Situação** (dê dois cliques na célula).")
         
         colunas_exibicao = ['Código documento', 'Fornecedor', 'PlanoConta', 'Data vencimento', 'Valor Visual', 'Situação pagamento documento']
         
-        # Cópia para exibição formatada
         df_exibicao = df.copy()
         if 'Valor documento' in df_exibicao.columns:
             df_exibicao['Valor Visual'] = df_exibicao['Valor documento'].apply(formatar_moeda)
@@ -135,8 +141,8 @@ if not df.empty:
             df_editado = st.data_editor(
                 df_exibicao[colunas_disponiveis],
                 column_config={
-                    "Situação pagamento documento": st.column_config.SelectboxColumn("Situação", options=["Em Aberto", "Pago", "Cancelado", "Atrasado"], required=True),
-                    "Valor Visual": st.column_config.TextColumn("Valor do Título (R$)") 
+                    "Situação pagamento documento": st.column_config.SelectboxColumn("Situação", options=STATUS_ORIGINAIS, required=True),
+                    "Valor Visual": st.column_config.TextColumn("Valor do Título") 
                 },
                 disabled=["Código documento", "Fornecedor", "PlanoConta", "Data vencimento", "Valor Visual"],
                 use_container_width=True, hide_index=True, height=400
@@ -145,19 +151,23 @@ if not df.empty:
             
             if salvar:
                 df['Situação pagamento documento'] = df_editado['Situação pagamento documento']
-                df.loc[df['Situação pagamento documento'] == 'Pago', 'Valor pago'] = df['Valor documento']
-                df.loc[df['Situação pagamento documento'] != 'Pago', 'Valor pago'] = 0.0
+                
+                # Regra: Se for BAIXA AUTOMÁTICA ou BAIXA MANUAL, conta como pago.
+                pagos_mask = df['Situação pagamento documento'].isin(["BAIXA AUTOMÁTICA", "BAIXA MANUAL"])
+                df.loc[pagos_mask, 'Valor pago'] = df['Valor documento']
+                df.loc[~pagos_mask, 'Valor pago'] = 0.0
+                
                 st.session_state['df_dados'] = df
                 st.success("✅ Atualização concluída!")
                 st.rerun()
 
         st.divider()
         st.subheader("Exportar Dados Consolidados")
-        csv_export = df.drop(columns=['Ano', 'Mês'], errors='ignore').to_csv(sep=';', index=False, encoding='utf-16-le').encode('utf-16-le')
+        csv_export = df.drop(columns=['Ano', 'Mês', 'Valor Visual'], errors='ignore').to_csv(sep=';', index=False, encoding='utf-16-le').encode('utf-16-le')
         st.download_button("📥 Baixar Planilha Atualizada", data=csv_export, file_name='RelatorioCAP_Atualizado.csv', mime='text/csv')
 
     # ==========================================
-    # PÁGINA 4: RELATÓRIO ANALÍTICO (NOVA)
+    # PÁGINA 4: RELATÓRIO ANALÍTICO
     # ==========================================
     elif pagina == "Relatório Analítico (Mensal/Anual)":
         st.title("📅 Relatório Analítico de Lançamentos")
@@ -174,9 +184,10 @@ if not df.empty:
         meses_opcoes = ["Todos"] + [meses_nomes.get(m, str(m)) for m in meses_disponiveis]
         mes_selecionado = col_filtro2.selectbox("Selecione o Mês", meses_opcoes)
         
-        situacao_selecionada = col_filtro3.selectbox("Filtro de Situação", ["Apenas Pagos", "Apenas Em Aberto", "Todos os Lançamentos"])
+        # Filtro com os status exatos da planilha
+        filtros_situacao = ["Todos os Lançamentos"] + STATUS_ORIGINAIS
+        situacao_selecionada = col_filtro3.selectbox("Filtro de Situação", filtros_situacao)
         
-        # Lógica de Filtragem
         df_filtrado = df.copy()
         
         if ano_selecionado != "Todos":
@@ -186,18 +197,16 @@ if not df.empty:
             mes_numero = [k for k, v in meses_nomes.items() if v == mes_selecionado][0]
             df_filtrado = df_filtrado[df_filtrado['Mês'] == mes_numero]
             
-        if situacao_selecionada == "Apenas Pagos":
-            df_filtrado = df_filtrado[df_filtrado['Situação pagamento documento'] == 'Pago']
-        elif situacao_selecionada == "Apenas Em Aberto":
-            df_filtrado = df_filtrado[df_filtrado['Situação pagamento documento'] == 'Em Aberto']
+        if situacao_selecionada != "Todos os Lançamentos":
+            df_filtrado = df_filtrado[df_filtrado['Situação pagamento documento'] == situacao_selecionada]
             
         st.divider()
         st.subheader(f"Resultados do Período ({len(df_filtrado)} lançamentos encontrados)")
         
         c1, c2, c3 = st.columns(3)
-        c1.metric("Valor Total Lançado (Período)", formatar_moeda(df_filtrado['Valor documento'].sum()))
-        c2.metric("Valor Efetivamente Pago (Período)", formatar_moeda(df_filtrado['Valor pago'].sum()))
-        c3.metric("Saldo Pendente (Período)", formatar_moeda(df_filtrado['Valor documento'].sum() - df_filtrado['Valor pago'].sum()))
+        c1.metric("Valor Total Lançado", formatar_moeda(df_filtrado['Valor documento'].sum()))
+        c2.metric("Valor Efetivamente Pago", formatar_moeda(df_filtrado['Valor pago'].sum()))
+        c3.metric("Saldo Pendente", formatar_moeda(df_filtrado['Valor documento'].sum() - df_filtrado['Valor pago'].sum()))
         
         st.markdown("### 📋 Dados Analíticos Detalhados")
         df_exibicao_analitico = df_filtrado.copy()
@@ -230,10 +239,10 @@ if not df.empty:
                     if st.button("Integrar Novos Lançamentos ao Sistema"):
                         df = pd.concat([df, df_filtrado], ignore_index=True)
                         st.session_state['df_dados'] = df
-                        st.success("Banco de dados atualizado com sucesso! Vá para o Dashboard para ver os novos números.")
+                        st.success("Banco de dados atualizado! Vá para o Dashboard para ver os números.")
                         st.rerun()
                 else:
-                    st.info("ℹ️ Nenhum lançamento novo encontrado. Todos os registros deste arquivo já estão no sistema.")
+                    st.info("ℹ️ Nenhum lançamento novo encontrado. Todos os registros já estão no sistema.")
 
         st.divider()
         st.subheader("2. Inclusão Manual (Lançamento Avulso)")
@@ -249,7 +258,7 @@ if not df.empty:
             
             col_e, col_f = st.columns(2)
             data_venc = col_e.date_input("Data de Vencimento")
-            situacao = col_f.selectbox("Situação", ["Em Aberto", "Pago"])
+            situacao = col_f.selectbox("Situação", STATUS_ORIGINAIS)
             
             salvar_manual = st.form_submit_button("Registrar Lançamento Avulso")
             
@@ -264,7 +273,7 @@ if not df.empty:
                         'Fornecedor': fornecedor,
                         'PlanoConta': plano_conta,
                         'Valor documento': valor_novo,
-                        'Valor pago': valor_novo if situacao == 'Pago' else 0.0,
+                        'Valor pago': valor_novo if situacao in ["BAIXA AUTOMÁTICA", "BAIXA MANUAL"] else 0.0,
                         'Data vencimento': data_venc.strftime('%d/%m/%Y'),
                         'Situação pagamento documento': situacao,
                         'Ano': data_venc.year,
@@ -272,7 +281,7 @@ if not df.empty:
                     }])
                     df = pd.concat([df, novo_registro], ignore_index=True)
                     st.session_state['df_dados'] = df
-                    st.success(f"✅ Lançamento de {formatar_moeda(valor_novo)} para {fornecedor} inserido com sucesso!")
+                    st.success(f"✅ Lançamento de {formatar_moeda(valor_novo)} inserido!")
                     
 else:
     st.warning("Não foi possível carregar os dados iniciais. Verifique o arquivo RelatorioCAP.csv no repositório.")
