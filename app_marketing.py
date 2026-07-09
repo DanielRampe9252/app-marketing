@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import datetime
+import json
 from streamlit_gsheets import GSheetsConnection
 
 # 1. Configuração da Página
@@ -27,16 +28,20 @@ orcamento_padrao = st.sidebar.number_input("Orçamento Padrão (R$)", value=4500
 # ==========================================
 # 2. CONEXÃO COM O GOOGLE SHEETS
 # ==========================================
-# Inicia a conexão segura usando os segredos que você configurou no painel do Streamlit
-conn = st.connection("gsheets", type=GSheetsConnection)
-url_planilha = st.secrets["spreadsheet_url"]
+# Força o aplicativo a ler o JSON do robô corretamente
+try:
+    url_planilha = st.secrets["spreadsheet_url"]
+    credenciais = json.loads(st.secrets["google_json"])
+    conn = st.connection("gsheets", type=GSheetsConnection, **credenciais)
+except Exception as e:
+    st.error(f"Erro ao ler as credenciais no Streamlit Secrets. Verifique a formatação. Detalhe: {e}")
+    st.stop()
 
-@st.cache_data(ttl=30) # Atualiza a cada 30 segundos ou quando forçado
+@st.cache_data(ttl=30)
 def carregar_do_google():
     try:
-        # Lê a planilha do Google
         df = conn.read(spreadsheet=url_planilha)
-        df = df.dropna(how="all") # Remove linhas totalmente vazias do Google
+        df = df.dropna(how="all") 
         
         for col in ['Valor documento', 'Valor pago']:
             if col in df.columns:
@@ -50,19 +55,17 @@ def carregar_do_google():
             df['Mês'] = data_dt.dt.month.fillna(datetime.datetime.now().month).astype(int)
         return df
     except Exception as e:
-        st.error(f"Erro ao conectar com o Google Sheets: {e}")
+        st.error(f"Erro ao carregar dados do Google Sheets: {e}")
         return pd.DataFrame()
 
-# Função para Salvar Alterações de volta no Google Sheets
 def salvar_no_google(df_novo):
     with st.spinner("Sincronizando com o Banco de Dados (Google Sheets)..."):
         df_salvar = df_novo.copy()
-        df_salvar = df_salvar.fillna("") # Preenche vazios para não gerar erro no Google
+        df_salvar = df_salvar.fillna("") 
         conn.update(spreadsheet=url_planilha, data=df_salvar)
-        st.cache_data.clear() # Limpa a memória para forçar o aplicativo a ler os dados novos
+        st.cache_data.clear() 
         st.session_state['df_dados'] = df_novo
 
-# Inicialização de Memória e Dados
 if 'df_dados' not in st.session_state: st.session_state['df_dados'] = carregar_do_google()
 if 'orcamentos_congelados' not in st.session_state: st.session_state['orcamentos_congelados'] = {}
 
@@ -75,8 +78,6 @@ def formatar_moeda(valor):
     return f"R$ {valor:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
 
 if not df.empty:
-    
-    # Trava de Segurança
     if 'Ano' not in df.columns or 'Mês' not in df.columns:
         if 'Data vencimento' in df.columns:
             data_dt = pd.to_datetime(df['Data vencimento'], format='%d/%m/%Y', errors='coerce')
@@ -191,8 +192,6 @@ if not df.empty:
                 pagos_mask = df['Situação pagamento documento'].isin(["BAIXA AUTOMÁTICA", "BAIXA MANUAL"])
                 df.loc[pagos_mask, 'Valor pago'] = df['Valor documento']
                 df.loc[~pagos_mask, 'Valor pago'] = 0.0
-                
-                # CHAMA A FUNÇÃO PARA SALVAR NO GOOGLE SHEETS
                 salvar_no_google(df)
                 st.success("✅ Banco de dados atualizado com sucesso!")
                 st.rerun()
@@ -258,7 +257,6 @@ if not df.empty:
         st.subheader("1. Importação Automática (Planilha CSV)")
         arquivo_upload = st.file_uploader("Suba um CSV para cruzar com o Banco de Dados:", type=['csv'])
         if arquivo_upload is not None:
-            # Reutiliza a função de tratamento anterior para ler o CSV que o usuário upou
             try:
                 df_novo = pd.read_csv(arquivo_upload, encoding='utf-16-le', sep=';', skiprows=1, on_bad_lines='skip', engine='python')
                 for col in ['Valor documento', 'Valor pago']:
