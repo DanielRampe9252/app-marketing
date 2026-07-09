@@ -42,10 +42,13 @@ def carregar_e_tratar_csv(file):
     except Exception as e:
         return pd.DataFrame()
 
-# Banco de Dados de Lançamentos
+# Variáveis Globais na Memória do Aplicativo (Session State)
 if 'df_dados' not in st.session_state: st.session_state['df_dados'] = carregar_e_tratar_csv('RelatorioCAP.csv')
-# Cofre de Orçamentos Congelados (Guarda os orçamentos definidos para cada mês)
 if 'orcamentos_congelados' not in st.session_state: st.session_state['orcamentos_congelados'] = {}
+
+# Memória para manter os filtros do Dashboard salvos ao trocar de página
+if 'dash_ano' not in st.session_state: st.session_state['dash_ano'] = datetime.datetime.now().year
+if 'dash_mes_nome' not in st.session_state: st.session_state['dash_mes_nome'] = MESES_NOMES.get(datetime.datetime.now().month, 'Janeiro')
 
 df = st.session_state['df_dados']
 
@@ -54,6 +57,13 @@ def formatar_moeda(valor):
 
 if not df.empty:
     
+    if 'Ano' not in df.columns or 'Mês' not in df.columns:
+        if 'Data vencimento' in df.columns:
+            data_dt = pd.to_datetime(df['Data vencimento'], format='%d/%m/%Y', errors='coerce')
+            df['Ano'] = data_dt.dt.year.fillna(datetime.datetime.now().year).astype(int)
+            df['Mês'] = data_dt.dt.month.fillna(datetime.datetime.now().month).astype(int)
+            st.session_state['df_dados'] = df
+
     # ==========================================
     # PÁGINA 1: DASHBOARD PRINCIPAL
     # ==========================================
@@ -62,18 +72,30 @@ if not df.empty:
         st.markdown("### Selecione o Período de Análise")
         col_ano, col_mes = st.columns(2)
         
+        # Recupera as listas disponíveis
         anos_disponiveis = sorted(df['Ano'].dropna().unique().tolist())
         if not anos_disponiveis: anos_disponiveis = [datetime.datetime.now().year]
-        ano_selecionado = col_ano.selectbox("Ano de Referência", anos_disponiveis, index=len(anos_disponiveis)-1)
+        
+        # Pega a posição do ano salvo na memória (se existir)
+        try: idx_ano = anos_disponiveis.index(st.session_state['dash_ano'])
+        except ValueError: idx_ano = len(anos_disponiveis)-1
+            
+        ano_selecionado = col_ano.selectbox("Ano de Referência", anos_disponiveis, index=idx_ano)
+        st.session_state['dash_ano'] = ano_selecionado # Salva na memória a escolha atual
         
         meses_disponiveis = sorted(df[df['Ano'] == ano_selecionado]['Mês'].dropna().unique().tolist())
         meses_opcoes = [MESES_NOMES.get(m, str(m)) for m in meses_disponiveis]
         if not meses_opcoes: meses_opcoes = [MESES_NOMES[datetime.datetime.now().month]]
-        mes_selecionado_nome = col_mes.selectbox("Mês de Referência", meses_opcoes)
+        
+        # Pega a posição do mês salvo na memória
+        try: idx_mes = meses_opcoes.index(st.session_state['dash_mes_nome'])
+        except ValueError: idx_mes = 0
+            
+        mes_selecionado_nome = col_mes.selectbox("Mês de Referência", meses_opcoes, index=idx_mes)
+        st.session_state['dash_mes_nome'] = mes_selecionado_nome # Salva na memória
         
         mes_selecionado = [k for k, v in MESES_NOMES.items() if v == mes_selecionado_nome][0]
         
-        # Recupera o orçamento congelado para este mês (se não houver, usa o padrão da barra lateral)
         chave_mes = f"{ano_selecionado}-{mes_selecionado}"
         orcamento_vigente = st.session_state['orcamentos_congelados'].get(chave_mes, orcamento_padrao)
         
@@ -81,20 +103,24 @@ if not df.empty:
         total_doc_mes = df_mes['Valor documento'].sum()
         total_pago_mes = df_mes['Valor pago'].sum()
         saldo_pendente_mes = total_doc_mes - total_pago_mes
+        diferenca_orcamento = total_doc_mes - orcamento_vigente
         
         st.divider()
         
-        # Alerta Dinâmico integrado ao Orçamento Congelado
-        if total_doc_mes > orcamento_vigente:
-            st.error(f"⚠️ ALERTA DE ORÇAMENTO: Em {mes_selecionado_nome}/{ano_selecionado}, o limite de {formatar_moeda(orcamento_vigente)} foi ultrapassado! Total lançado: {formatar_moeda(total_doc_mes)}")
-        else:
-            st.success(f"✅ Orçamento sob controle em {mes_selecionado_nome}/{ano_selecionado}. Disponível: {formatar_moeda(orcamento_vigente - total_doc_mes)}")
-            
+        # Alerta Dinâmico e Cards Financeiros Dinâmicos (Com campo de diferença exata)
         st.header(f"Resumo Financeiro ({mes_selecionado_nome}/{ano_selecionado})")
-        c1, c2, c3 = st.columns(3)
+        
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Lançado (Mês)", formatar_moeda(total_doc_mes))
         c2.metric("Total Pago (Mês)", formatar_moeda(total_pago_mes))
         c3.metric("Saldo Pendente (Mês)", formatar_moeda(saldo_pendente_mes))
+        
+        if diferenca_orcamento > 0:
+            st.error(f"⚠️ ALERTA DE ORÇAMENTO: Em {mes_selecionado_nome}/{ano_selecionado}, o limite de {formatar_moeda(orcamento_vigente)} foi ultrapassado na quantia de {formatar_moeda(diferenca_orcamento)}!")
+            c4.metric("🚨 Valor Ultrapassado", formatar_moeda(diferenca_orcamento))
+        else:
+            st.success(f"✅ Orçamento sob controle em {mes_selecionado_nome}/{ano_selecionado}.")
+            c4.metric("Orçamento Disponível", formatar_moeda(abs(diferenca_orcamento)))
 
         st.subheader("Distribuição de Gastos por Plano de Contas")
         if not df_mes.empty:
@@ -102,13 +128,14 @@ if not df.empty:
             fig = px.bar(df_agrupado.sort_values(by='Valor documento', ascending=False), x='PlanoConta', y='Valor documento', text_auto='.2s', color='PlanoConta')
             fig.update_layout(showlegend=False, yaxis_title="Valor (R$)")
             st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Nenhum lançamento encontrado para este mês.")
 
     # ==========================================
     # PÁGINA 2: ANÁLISE DE CUSTOS DETALHADA
     # ==========================================
     elif pagina == "Análise de Custos Detalhada":
         st.title("🔎 Análise de Custos Detalhada")
-        
         st.subheader("📈 Evolução Mensal de Custos (Todos os Períodos)")
         df_temporal = df.groupby(['Ano', 'Mês'])['Valor documento'].sum().reset_index()
         df_temporal = df_temporal.sort_values(by=['Ano', 'Mês'])
@@ -182,19 +209,14 @@ if not df.empty:
         
         situacoes_selecionadas = col_filtro3.multiselect("Filtre por Situação:", options=STATUS_ORIGINAIS, default=STATUS_ORIGINAIS)
         
-        # --- PAINEL DE CONGELAMENTO DE ORÇAMENTO (Aparece só se escolher um mês específico) ---
         if ano_selecionado != "Todos" and mes_selecionado_nome != "Todos":
             mes_selecionado = [k for k, v in MESES_NOMES.items() if v == mes_selecionado_nome][0]
             chave_atual = f"{ano_selecionado}-{mes_selecionado}"
             
-            # Lógica para encontrar o mês anterior
-            if mes_selecionado == 1:
-                mes_ant, ano_ant = 12, ano_selecionado - 1
-            else:
-                mes_ant, ano_ant = mes_selecionado - 1, ano_selecionado
+            if mes_selecionado == 1: mes_ant, ano_ant = 12, ano_selecionado - 1
+            else: mes_ant, ano_ant = mes_selecionado - 1, ano_selecionado
                 
             chave_anterior = f"{ano_ant}-{mes_ant}"
-            
             orc_atual_salvo = st.session_state['orcamentos_congelados'].get(chave_atual, orcamento_padrao)
             orc_ant_salvo = st.session_state['orcamentos_congelados'].get(chave_anterior, "Não Definido")
             
@@ -212,9 +234,8 @@ if not df.empty:
                     st.rerun()
             with c_orc3:
                 valor_ant_texto = formatar_moeda(orc_ant_salvo) if isinstance(orc_ant_salvo, float) else orc_ant_salvo
-                st.metric(f"Estimativa Congelada no Mês Anterior ({MESES_NOMES[mes_ant]}/{ano_ant})", valor_ant_texto)
+                st.metric(f"Estimativa Congelada no Mês Anterior ({MESES_NOMES.get(mes_ant, mes_ant)}/{ano_ant})", valor_ant_texto)
                 
-        # Lógica de Filtragem Analítica
         df_filtrado = df.copy()
         if ano_selecionado != "Todos": df_filtrado = df_filtrado[df_filtrado['Ano'] == ano_selecionado]
         if mes_selecionado_nome != "Todos": df_filtrado = df_filtrado[df_filtrado['Mês'] == mes_selecionado]
@@ -239,7 +260,6 @@ if not df.empty:
     # ==========================================
     elif pagina == "Adicionar / Importar Dados":
         st.title("➕ Alimentar Sistema")
-        # (O código de importação permanece igual ao anterior)
         st.subheader("1. Importação Automática (Planilha CSV)")
         arquivo_upload = st.file_uploader("Arraste ou escolha o arquivo CSV", type=['csv'])
         if arquivo_upload is not None:
