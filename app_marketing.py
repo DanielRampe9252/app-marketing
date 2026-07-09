@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import datetime
+from streamlit_gsheets import GSheetsConnection
 
 # 1. Configuração da Página
 st.set_page_config(page_title="Controle CAP - Marketing", layout="wide", initial_sidebar_state="expanded")
@@ -21,13 +22,22 @@ pagina = st.sidebar.radio("Selecione a Página", [
 ])
 st.sidebar.divider()
 st.sidebar.markdown("### Configuração Geral")
-orcamento_padrao = st.sidebar.number_input("Orçamento Padrão (R$)", value=450000.0, step=1000.0, help="Este valor será usado caso o mês não tenha um orçamento congelado.")
+orcamento_padrao = st.sidebar.number_input("Orçamento Padrão (R$)", value=450000.0, step=1000.0)
 
-# 2. Inicialização de Memória e Dados
-@st.cache_data
-def carregar_e_tratar_csv(file):
+# ==========================================
+# 2. CONEXÃO COM O GOOGLE SHEETS
+# ==========================================
+# Inicia a conexão segura usando os segredos que você configurou no painel do Streamlit
+conn = st.connection("gsheets", type=GSheetsConnection)
+url_planilha = st.secrets["spreadsheet_url"]
+
+@st.cache_data(ttl=30) # Atualiza a cada 30 segundos ou quando forçado
+def carregar_do_google():
     try:
-        df = pd.read_csv(file, encoding='utf-16-le', sep=';', skiprows=1, on_bad_lines='skip', engine='python')
+        # Lê a planilha do Google
+        df = conn.read(spreadsheet=url_planilha)
+        df = df.dropna(how="all") # Remove linhas totalmente vazias do Google
+        
         for col in ['Valor documento', 'Valor pago']:
             if col in df.columns:
                 df[col] = df[col].astype(str).str.replace('R$', '', regex=False).str.replace('.', '', regex=False).str.replace(',', '.', regex=False).astype(float)
@@ -40,13 +50,22 @@ def carregar_e_tratar_csv(file):
             df['Mês'] = data_dt.dt.month.fillna(datetime.datetime.now().month).astype(int)
         return df
     except Exception as e:
+        st.error(f"Erro ao conectar com o Google Sheets: {e}")
         return pd.DataFrame()
 
-# Variáveis Globais na Memória do Aplicativo (Session State)
-if 'df_dados' not in st.session_state: st.session_state['df_dados'] = carregar_e_tratar_csv('RelatorioCAP.csv')
+# Função para Salvar Alterações de volta no Google Sheets
+def salvar_no_google(df_novo):
+    with st.spinner("Sincronizando com o Banco de Dados (Google Sheets)..."):
+        df_salvar = df_novo.copy()
+        df_salvar = df_salvar.fillna("") # Preenche vazios para não gerar erro no Google
+        conn.update(spreadsheet=url_planilha, data=df_salvar)
+        st.cache_data.clear() # Limpa a memória para forçar o aplicativo a ler os dados novos
+        st.session_state['df_dados'] = df_novo
+
+# Inicialização de Memória e Dados
+if 'df_dados' not in st.session_state: st.session_state['df_dados'] = carregar_do_google()
 if 'orcamentos_congelados' not in st.session_state: st.session_state['orcamentos_congelados'] = {}
 
-# Memória para manter os filtros do Dashboard salvos ao trocar de página
 if 'dash_ano' not in st.session_state: st.session_state['dash_ano'] = datetime.datetime.now().year
 if 'dash_mes_nome' not in st.session_state: st.session_state['dash_mes_nome'] = MESES_NOMES.get(datetime.datetime.now().month, 'Janeiro')
 
@@ -57,6 +76,7 @@ def formatar_moeda(valor):
 
 if not df.empty:
     
+    # Trava de Segurança
     if 'Ano' not in df.columns or 'Mês' not in df.columns:
         if 'Data vencimento' in df.columns:
             data_dt = pd.to_datetime(df['Data vencimento'], format='%d/%m/%Y', errors='coerce')
@@ -69,31 +89,24 @@ if not df.empty:
     # ==========================================
     if pagina == "Dashboard Principal":
         st.title("📊 Dashboard Principal - Setor de Marketing")
-        st.markdown("### Selecione o Período de Análise")
         col_ano, col_mes = st.columns(2)
         
-        # Recupera as listas disponíveis
         anos_disponiveis = sorted(df['Ano'].dropna().unique().tolist())
         if not anos_disponiveis: anos_disponiveis = [datetime.datetime.now().year]
-        
-        # Pega a posição do ano salvo na memória (se existir)
         try: idx_ano = anos_disponiveis.index(st.session_state['dash_ano'])
         except ValueError: idx_ano = len(anos_disponiveis)-1
             
         ano_selecionado = col_ano.selectbox("Ano de Referência", anos_disponiveis, index=idx_ano)
-        st.session_state['dash_ano'] = ano_selecionado # Salva na memória a escolha atual
+        st.session_state['dash_ano'] = ano_selecionado 
         
         meses_disponiveis = sorted(df[df['Ano'] == ano_selecionado]['Mês'].dropna().unique().tolist())
         meses_opcoes = [MESES_NOMES.get(m, str(m)) for m in meses_disponiveis]
         if not meses_opcoes: meses_opcoes = [MESES_NOMES[datetime.datetime.now().month]]
-        
-        # Pega a posição do mês salvo na memória
         try: idx_mes = meses_opcoes.index(st.session_state['dash_mes_nome'])
         except ValueError: idx_mes = 0
             
         mes_selecionado_nome = col_mes.selectbox("Mês de Referência", meses_opcoes, index=idx_mes)
-        st.session_state['dash_mes_nome'] = mes_selecionado_nome # Salva na memória
-        
+        st.session_state['dash_mes_nome'] = mes_selecionado_nome 
         mes_selecionado = [k for k, v in MESES_NOMES.items() if v == mes_selecionado_nome][0]
         
         chave_mes = f"{ano_selecionado}-{mes_selecionado}"
@@ -106,8 +119,6 @@ if not df.empty:
         diferenca_orcamento = total_doc_mes - orcamento_vigente
         
         st.divider()
-        
-        # Alerta Dinâmico e Cards Financeiros Dinâmicos (Com campo de diferença exata)
         st.header(f"Resumo Financeiro ({mes_selecionado_nome}/{ano_selecionado})")
         
         c1, c2, c3, c4 = st.columns(4)
@@ -122,30 +133,25 @@ if not df.empty:
             st.success(f"✅ Orçamento sob controle em {mes_selecionado_nome}/{ano_selecionado}.")
             c4.metric("Orçamento Disponível", formatar_moeda(abs(diferenca_orcamento)))
 
-        st.subheader("Distribuição de Gastos por Plano de Contas")
+        st.subheader("Distribuição de Gastos")
         if not df_mes.empty:
             df_agrupado = df_mes.groupby('PlanoConta')['Valor documento'].sum().reset_index()
             fig = px.bar(df_agrupado.sort_values(by='Valor documento', ascending=False), x='PlanoConta', y='Valor documento', text_auto='.2s', color='PlanoConta')
             fig.update_layout(showlegend=False, yaxis_title="Valor (R$)")
             st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Nenhum lançamento encontrado para este mês.")
 
     # ==========================================
     # PÁGINA 2: ANÁLISE DE CUSTOS DETALHADA
     # ==========================================
     elif pagina == "Análise de Custos Detalhada":
         st.title("🔎 Análise de Custos Detalhada")
-        st.subheader("📈 Evolução Mensal de Custos (Todos os Períodos)")
-        df_temporal = df.groupby(['Ano', 'Mês'])['Valor documento'].sum().reset_index()
-        df_temporal = df_temporal.sort_values(by=['Ano', 'Mês'])
+        st.subheader("📈 Evolução Mensal de Custos")
+        df_temporal = df.groupby(['Ano', 'Mês'])['Valor documento'].sum().reset_index().sort_values(by=['Ano', 'Mês'])
         df_temporal['Período'] = df_temporal['Mês'].map(MESES_NOMES).astype(str) + "/" + df_temporal['Ano'].astype(str)
-        
-        fig_linha = px.bar(df_temporal, x='Período', y='Valor documento', text_auto='.2s', title="Custo Total Lançado por Mês")
-        st.plotly_chart(fig_linha, use_container_width=True)
+        st.plotly_chart(px.bar(df_temporal, x='Período', y='Valor documento', text_auto='.2s'), use_container_width=True)
         
         st.divider()
-        st.subheader("🧩 Representatividade por Categoria (Global)")
+        st.subheader("🧩 Representatividade Global")
         total_doc_global = df['Valor documento'].sum()
         df_custos = df.groupby('PlanoConta')['Valor documento'].sum().reset_index().sort_values(by='Valor documento', ascending=False)
         df_custos['% do Orçamento Padrão'] = (df_custos['Valor documento'] / orcamento_padrao) * 100
@@ -153,7 +159,7 @@ if not df.empty:
         
         col_grafico, col_tabela = st.columns([1, 1.2])
         with col_grafico:
-            st.plotly_chart(px.pie(df_custos, values='Valor documento', names='PlanoConta', title='Divisão dos Gastos'), use_container_width=True)
+            st.plotly_chart(px.pie(df_custos, values='Valor documento', names='PlanoConta'), use_container_width=True)
         with col_tabela:
             df_display = df_custos.copy()
             df_display['Valor documento'] = df_display['Valor documento'].apply(formatar_moeda)
@@ -166,7 +172,7 @@ if not df.empty:
     # ==========================================
     elif pagina == "Gestão de Pagamentos (Baixas)":
         st.title("💸 Gestão de Pagamentos")
-        st.markdown("Altere a **Situação** (dê dois cliques na célula).")
+        st.info("💡 Qualquer alteração salva aqui será gravada imediatamente na sua planilha do Google Sheets.")
         
         colunas_exibicao = ['Código documento', 'Fornecedor', 'PlanoConta', 'Data vencimento', 'Valor Visual', 'Situação pagamento documento']
         df_exibicao = df.copy()
@@ -180,19 +186,16 @@ if not df.empty:
                 disabled=["Código documento", "Fornecedor", "PlanoConta", "Data vencimento", "Valor Visual"],
                 use_container_width=True, hide_index=True, height=400
             )
-            if st.form_submit_button("💾 Salvar Alterações e Recalcular"):
+            if st.form_submit_button("💾 Salvar Alterações na Nuvem"):
                 df['Situação pagamento documento'] = df_editado['Situação pagamento documento']
                 pagos_mask = df['Situação pagamento documento'].isin(["BAIXA AUTOMÁTICA", "BAIXA MANUAL"])
                 df.loc[pagos_mask, 'Valor pago'] = df['Valor documento']
                 df.loc[~pagos_mask, 'Valor pago'] = 0.0
-                st.session_state['df_dados'] = df
-                st.success("✅ Atualização concluída!")
+                
+                # CHAMA A FUNÇÃO PARA SALVAR NO GOOGLE SHEETS
+                salvar_no_google(df)
+                st.success("✅ Banco de dados atualizado com sucesso!")
                 st.rerun()
-
-        st.divider()
-        st.subheader("Exportar Dados Consolidados")
-        csv_export = df.drop(columns=['Ano', 'Mês', 'Valor Visual'], errors='ignore').to_csv(sep=';', index=False, encoding='utf-16-le').encode('utf-16-le')
-        st.download_button("📥 Baixar Planilha Atualizada", data=csv_export, file_name='RelatorioCAP_Atualizado.csv', mime='text/csv')
 
     # ==========================================
     # PÁGINA 4: RELATÓRIO ANALÍTICO
@@ -212,29 +215,21 @@ if not df.empty:
         if ano_selecionado != "Todos" and mes_selecionado_nome != "Todos":
             mes_selecionado = [k for k, v in MESES_NOMES.items() if v == mes_selecionado_nome][0]
             chave_atual = f"{ano_selecionado}-{mes_selecionado}"
-            
-            if mes_selecionado == 1: mes_ant, ano_ant = 12, ano_selecionado - 1
-            else: mes_ant, ano_ant = mes_selecionado - 1, ano_selecionado
-                
+            mes_ant, ano_ant = (12, ano_selecionado - 1) if mes_selecionado == 1 else (mes_selecionado - 1, ano_selecionado)
             chave_anterior = f"{ano_ant}-{mes_ant}"
             orc_atual_salvo = st.session_state['orcamentos_congelados'].get(chave_atual, orcamento_padrao)
             orc_ant_salvo = st.session_state['orcamentos_congelados'].get(chave_anterior, "Não Definido")
             
             st.divider()
-            st.markdown(f"### 🔒 Controle de Orçamento de {mes_selecionado_nome}/{ano_selecionado}")
             c_orc1, c_orc2, c_orc3 = st.columns([1.5, 1, 1.5])
-            
-            with c_orc1:
-                novo_orc = st.number_input("Estipular / Alterar Estimativa Deste Mês (R$)", value=float(orc_atual_salvo))
+            with c_orc1: novo_orc = st.number_input(f"Congelar Estimativa para {mes_selecionado_nome} (R$)", value=float(orc_atual_salvo))
             with c_orc2:
                 st.markdown("<br>", unsafe_allow_html=True)
-                if st.button("❄️ Congelar Orçamento"):
+                if st.button("❄️ Congelar"):
                     st.session_state['orcamentos_congelados'][chave_atual] = novo_orc
-                    st.success("Orçamento congelado com sucesso!")
                     st.rerun()
             with c_orc3:
-                valor_ant_texto = formatar_moeda(orc_ant_salvo) if isinstance(orc_ant_salvo, float) else orc_ant_salvo
-                st.metric(f"Estimativa Congelada no Mês Anterior ({MESES_NOMES.get(mes_ant, mes_ant)}/{ano_ant})", valor_ant_texto)
+                st.metric(f"Mês Anterior ({MESES_NOMES.get(mes_ant, mes_ant)})", formatar_moeda(orc_ant_salvo) if isinstance(orc_ant_salvo, float) else orc_ant_salvo)
                 
         df_filtrado = df.copy()
         if ano_selecionado != "Todos": df_filtrado = df_filtrado[df_filtrado['Ano'] == ano_selecionado]
@@ -242,7 +237,6 @@ if not df.empty:
         df_filtrado = df_filtrado[df_filtrado['Situação pagamento documento'].isin(situacoes_selecionadas)] if situacoes_selecionadas else df_filtrado.iloc[0:0] 
             
         st.divider()
-        st.subheader(f"Resultados do Período Filtrado ({len(df_filtrado)} lançamentos)")
         c1, c2, c3 = st.columns(3)
         c1.metric("Valor Total Lançado", formatar_moeda(df_filtrado['Valor documento'].sum()))
         c2.metric("Valor Efetivamente Pago", formatar_moeda(df_filtrado['Valor pago'].sum()))
@@ -259,17 +253,35 @@ if not df.empty:
     # PÁGINA 5: ADICIONAR / IMPORTAR DADOS
     # ==========================================
     elif pagina == "Adicionar / Importar Dados":
-        st.title("➕ Alimentar Sistema")
+        st.title("➕ Alimentar Banco de Dados (Nuvem)")
+        
         st.subheader("1. Importação Automática (Planilha CSV)")
-        arquivo_upload = st.file_uploader("Arraste ou escolha o arquivo CSV", type=['csv'])
+        arquivo_upload = st.file_uploader("Suba um CSV para cruzar com o Banco de Dados:", type=['csv'])
         if arquivo_upload is not None:
-            df_novo = carregar_e_tratar_csv(arquivo_upload)
+            # Reutiliza a função de tratamento anterior para ler o CSV que o usuário upou
+            try:
+                df_novo = pd.read_csv(arquivo_upload, encoding='utf-16-le', sep=';', skiprows=1, on_bad_lines='skip', engine='python')
+                for col in ['Valor documento', 'Valor pago']:
+                    if col in df_novo.columns:
+                        df_novo[col] = df_novo[col].astype(str).str.replace('R$', '', regex=False).str.replace('.', '', regex=False).str.replace(',', '.', regex=False).astype(float)
+                if 'Situação pagamento documento' in df_novo.columns: df_novo['Situação pagamento documento'] = df_novo['Situação pagamento documento'].fillna('A PAGAR')
+                if 'Código documento' in df_novo.columns: df_novo['Código documento'] = df_novo['Código documento'].astype(str)
+                if 'Data vencimento' in df_novo.columns:
+                    data_dt = pd.to_datetime(df_novo['Data vencimento'], format='%d/%m/%Y', errors='coerce')
+                    df_novo['Ano'] = data_dt.dt.year.fillna(datetime.datetime.now().year).astype(int)
+                    df_novo['Mês'] = data_dt.dt.month.fillna(datetime.datetime.now().month).astype(int)
+            except Exception as e:
+                st.error("Erro na leitura do CSV.")
+                df_novo = pd.DataFrame()
+
             if not df_novo.empty:
                 df_filtrado = df_novo[~df_novo['Código documento'].isin(df['Código documento'].tolist())]
                 if len(df_filtrado) > 0:
                     st.success(f"✅ Encontrados {len(df_filtrado)} novos lançamentos!")
-                    if st.button("Integrar Novos Lançamentos"):
-                        st.session_state['df_dados'] = pd.concat([df, df_filtrado], ignore_index=True)
+                    if st.button("Integrar Novos Lançamentos ao Banco de Dados"):
+                        df_atualizado = pd.concat([df, df_filtrado], ignore_index=True)
+                        salvar_no_google(df_atualizado)
+                        st.success("Google Sheets atualizado! Os dados estão salvos permanentemente.")
                         st.rerun()
                 else: st.info("Nenhum lançamento novo encontrado.")
 
@@ -285,7 +297,12 @@ if not df.empty:
             col_e, col_f = st.columns(2)
             data_venc = col_e.date_input("Data de Vencimento")
             situacao = col_f.selectbox("Situação", STATUS_ORIGINAIS)
-            if st.form_submit_button("Registrar Lançamento Avulso") and fornecedor != "" and valor_novo > 0 and codigo not in df['Código documento'].values:
+            
+            if st.form_submit_button("Salvar no Banco de Dados") and fornecedor != "" and valor_novo > 0 and codigo not in df['Código documento'].values:
                 novo_registro = pd.DataFrame([{'Código documento': codigo, 'Fornecedor': fornecedor, 'PlanoConta': plano_conta, 'Valor documento': valor_novo, 'Valor pago': valor_novo if situacao in ["BAIXA AUTOMÁTICA", "BAIXA MANUAL"] else 0.0, 'Data vencimento': data_venc.strftime('%d/%m/%Y'), 'Situação pagamento documento': situacao, 'Ano': data_venc.year, 'Mês': data_venc.month}])
-                st.session_state['df_dados'] = pd.concat([df, novo_registro], ignore_index=True)
-                st.success("Lançamento inserido!")
+                df_atualizado = pd.concat([df, novo_registro], ignore_index=True)
+                salvar_no_google(df_atualizado)
+                st.success("Lançamento inserido e salvo no Google Sheets!")
+
+else:
+    st.info("Aguardando carregamento dos dados da Nuvem...")
