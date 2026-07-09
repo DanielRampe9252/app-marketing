@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import datetime
 import json
+import os
 from streamlit_gsheets import GSheetsConnection
 
 # 1. Configuração da Página
@@ -30,11 +31,19 @@ orcamento_padrao = st.sidebar.number_input("Orçamento Padrão (R$)", value=4500
 # ==========================================
 try:
     url_planilha = st.secrets["spreadsheet_url"]
-    credenciais = json.loads(st.secrets["google_json"])
-    # CORREÇÃO APLICADA AQUI: usando service_account_info para evitar conflito da palavra 'type'
-    conn = st.connection("gsheets", type=GSheetsConnection, service_account_info=credenciais)
+    
+    # O pulo do gato: cria um arquivo seguro com a chave para o Google ler diretamente!
+    with open("google_credentials.json", "w", encoding="utf-8") as f:
+        f.write(st.secrets["google_json"])
+    
+    # Avisa ao sistema operacional onde a chave está
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "google_credentials.json"
+    
+    # Inicia a conexão limpa (o Google puxa a chave sozinho)
+    conn = st.connection("gsheets", type=GSheetsConnection)
+    
 except Exception as e:
-    st.error(f"Erro ao conectar com as credenciais. Detalhe: {e}")
+    st.error(f"Erro na configuração de credenciais. Detalhe: {e}")
     st.stop()
 
 @st.cache_data(ttl=30)
