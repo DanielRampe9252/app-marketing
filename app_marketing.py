@@ -116,39 +116,25 @@ if not df.empty:
         st.title("💸 Gestão de Pagamentos")
         st.markdown("Altere a **Situação** (dê dois cliques na célula). Quando marcar como 'Pago', o sistema calculará o valor automaticamente.")
         
-        colunas_exibicao = ['Código documento', 'Fornecedor', 'PlanoConta', 'Data vencimento', 'Valor Visual', 'Situação pagamento documento']
-        
-        # Criando uma cópia para não estragar os cálculos da base principal
-        df_exibicao = df.copy()
-        
-        # Criando uma coluna puramente visual para o R$ e a formatação brasileira ficarem perfeitos na tela
-        if 'Valor documento' in df_exibicao.columns:
-            df_exibicao['Valor Visual'] = df_exibicao['Valor documento'].apply(lambda x: f"R$ {x:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-        
-        colunas_disponiveis = [c for c in colunas_exibicao if c in df_exibicao.columns]
+        colunas_exibicao = ['Código documento', 'Fornecedor', 'PlanoConta', 'Data vencimento', 'Valor documento', 'Situação pagamento documento']
+        colunas_disponiveis = [c for c in colunas_exibicao if c in df.columns]
         
         with st.form("form_edicao"):
-            # Ocultando a coluna original de número e exibindo a coluna visual formatada
             df_editado = st.data_editor(
-                df_exibicao[colunas_disponiveis],
+                df[colunas_disponiveis],
                 column_config={
                     "Situação pagamento documento": st.column_config.SelectboxColumn("Situação", options=["Em Aberto", "Pago", "Cancelado", "Atrasado"], required=True),
-                    "Valor Visual": st.column_config.TextColumn("Valor do Título (R$)") 
+                    "Valor documento": st.column_config.NumberColumn("Valor do Título", format="R$ %.2f")
                 },
-                disabled=["Código documento", "Fornecedor", "PlanoConta", "Data vencimento", "Valor Visual"],
+                disabled=["Código documento", "Fornecedor", "PlanoConta", "Data vencimento", "Valor documento"],
                 use_container_width=True, hide_index=True, height=400
             )
             salvar = st.form_submit_button("💾 Salvar Alterações e Recalcular")
             
             if salvar:
-                # Transfere as situações alteradas para o banco de dados original (df)
                 df['Situação pagamento documento'] = df_editado['Situação pagamento documento']
-                
-                # Refaz a regra de negócio para pagamentos
                 df.loc[df['Situação pagamento documento'] == 'Pago', 'Valor pago'] = df['Valor documento']
                 df.loc[df['Situação pagamento documento'] != 'Pago', 'Valor pago'] = 0.0
-                
-                # Salva no sistema
                 st.session_state['df_dados'] = df
                 st.success("✅ Atualização concluída!")
                 st.rerun()
@@ -199,7 +185,7 @@ if not df.empty:
             col_c, col_d = st.columns(2)
             lista_contas = df['PlanoConta'].dropna().unique().tolist()
             plano_conta = col_c.selectbox("Plano de Contas", lista_contas)
-            valor_novo = col_d.number_input("Valor da Despesa (R$)", min_value=0.0, format="% . 2f")
+            valor_novo = col_d.number_input("Valor da Despesa (R$)", min_value=0.0, format="%.2f")
             
             col_e, col_f = st.columns(2)
             data_venc = col_e.date_input("Data de Vencimento")
