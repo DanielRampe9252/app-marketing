@@ -6,6 +6,10 @@ import datetime
 # 1. Configuração da Página
 st.set_page_config(page_title="Controle CAP - Marketing", layout="wide", initial_sidebar_state="expanded")
 
+# Dicionário de Meses Global
+MESES_NOMES = {1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho', 7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'}
+STATUS_ORIGINAIS = ["A PAGAR", "BAIXA AUTOMÁTICA", "BAIXA MANUAL"]
+
 # --- Barra Lateral para Navegação e Orçamento ---
 st.sidebar.title("Navegação")
 pagina = st.sidebar.radio("Selecione a Página", [
@@ -17,9 +21,6 @@ pagina = st.sidebar.radio("Selecione a Página", [
 ])
 st.sidebar.divider()
 orcamento_mensal = st.sidebar.number_input("Orçamento Mensal Estipulado (R$)", value=450000.0, step=1000.0)
-
-# Status Reais Extraídos da sua Planilha
-STATUS_ORIGINAIS = ["A PAGAR", "BAIXA AUTOMÁTICA", "BAIXA MANUAL"]
 
 # 2. Função de Carregamento e Tratamento
 @st.cache_data
@@ -35,7 +36,6 @@ def carregar_e_tratar_csv(file):
                                              .astype(float)
         
         if 'Situação pagamento documento' in df.columns:
-            # Se vier vazio, assume que é "A PAGAR"
             df['Situação pagamento documento'] = df['Situação pagamento documento'].fillna('A PAGAR')
             
         if 'Código documento' in df.columns:
@@ -51,7 +51,7 @@ def carregar_e_tratar_csv(file):
         st.error(f"Erro ao processar o arquivo: {e}")
         return pd.DataFrame()
 
-# 3. Inicialização do Banco de Dados em Memória (Session State)
+# 3. Inicialização do Banco de Dados em Memória
 if 'df_dados' not in st.session_state:
     st.session_state['df_dados'] = carregar_e_tratar_csv('RelatorioCAP.csv')
 
@@ -59,7 +59,7 @@ df = st.session_state['df_dados']
 
 if not df.empty:
     
-    # Trava de Segurança Geral (Garante que Ano e Mês existam caso venham de cache antigo)
+    # Trava de Segurança
     if 'Ano' not in df.columns or 'Mês' not in df.columns:
         if 'Data vencimento' in df.columns:
             data_dt = pd.to_datetime(df['Data vencimento'], format='%d/%m/%Y', errors='coerce')
@@ -67,10 +67,6 @@ if not df.empty:
             df['Mês'] = data_dt.dt.month.fillna(datetime.datetime.now().month).astype(int)
             st.session_state['df_dados'] = df
 
-    total_doc = df['Valor documento'].sum()
-    total_pago = df['Valor pago'].sum()
-    saldo_pendente = total_doc - total_pago
-    
     def formatar_moeda(valor):
         return f"R$ {valor:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
 
@@ -80,45 +76,90 @@ if not df.empty:
     if pagina == "Dashboard Principal":
         st.title("📊 Dashboard Principal - Setor de Marketing")
         
-        if total_doc > orcamento_mensal:
-            st.error(f"⚠️ ALERTA: O orçamento estipulado de {formatar_moeda(orcamento_mensal)} foi ultrapassado! Total lançado: {formatar_moeda(total_doc)}")
-        else:
-            st.success(f"✅ Orçamento sob controle. Disponível: {formatar_moeda(orcamento_mensal - total_doc)}")
-            
-        st.header("Resumo Financeiro (Geral)")
+        # Filtros de Período para o Dashboard
+        st.markdown("### Selecione o Período de Análise")
+        col_ano, col_mes = st.columns(2)
         
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Lançado", formatar_moeda(total_doc))
-        col2.metric("Total Pago", formatar_moeda(total_pago))
-        col3.metric("Saldo Pendente", formatar_moeda(saldo_pendente))
+        anos_disponiveis = sorted(df['Ano'].dropna().unique().tolist())
+        if not anos_disponiveis: anos_disponiveis = [datetime.datetime.now().year]
+        ano_selecionado = col_ano.selectbox("Ano de Referência", anos_disponiveis, index=len(anos_disponiveis)-1)
+        
+        meses_disponiveis = sorted(df[df['Ano'] == ano_selecionado]['Mês'].dropna().unique().tolist())
+        meses_opcoes = [MESES_NOMES.get(m, str(m)) for m in meses_disponiveis]
+        if not meses_opcoes: meses_opcoes = [MESES_NOMES[datetime.datetime.now().month]]
+        mes_selecionado_nome = col_mes.selectbox("Mês de Referência", meses_opcoes)
+        
+        mes_selecionado = [k for k, v in MESES_NOMES.items() if v == mes_selecionado_nome][0]
+        
+        # Filtra os dados apenas para o mês escolhido
+        df_mes = df[(df['Ano'] == ano_selecionado) & (df['Mês'] == mes_selecionado)]
+        
+        total_doc_mes = df_mes['Valor documento'].sum()
+        total_pago_mes = df_mes['Valor pago'].sum()
+        saldo_pendente_mes = total_doc_mes - total_pago_mes
+        
+        st.divider()
+        
+        # Alerta Dinâmico baseado no Mês e no Orçamento
+        if total_doc_mes > orcamento_mensal:
+            st.error(f"⚠️ ALERTA DE ORÇAMENTO: Em {mes_selecionado_nome}/{ano_selecionado}, o orçamento estipulado de {formatar_moeda(orcamento_mensal)} foi ultrapassado! Total lançado: {formatar_moeda(total_doc_mes)}")
+        else:
+            st.success(f"✅ Orçamento sob controle em {mes_selecionado_nome}/{ano_selecionado}. Disponível: {formatar_moeda(orcamento_mensal - total_doc_mes)}")
+            
+        st.header(f"Resumo Financeiro ({mes_selecionado_nome}/{ano_selecionado})")
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Lançado (Mês)", formatar_moeda(total_doc_mes))
+        c2.metric("Total Pago (Mês)", formatar_moeda(total_pago_mes))
+        c3.metric("Saldo Pendente (Mês)", formatar_moeda(saldo_pendente_mes))
 
-        st.subheader("Distribuição de Gastos por Plano de Contas")
-        df_agrupado = df.groupby('PlanoConta')['Valor documento'].sum().reset_index()
-        df_agrupado = df_agrupado.sort_values(by='Valor documento', ascending=False)
-        fig = px.bar(df_agrupado, x='PlanoConta', y='Valor documento', text_auto='.2s', color='PlanoConta')
-        fig.update_layout(showlegend=False, yaxis_title="Valor (R$)")
-        st.plotly_chart(fig, use_container_width=True)
+        st.subheader("Distribuição de Gastos por Plano de Contas (Mês Selecionado)")
+        if not df_mes.empty:
+            df_agrupado = df_mes.groupby('PlanoConta')['Valor documento'].sum().reset_index()
+            df_agrupado = df_agrupado.sort_values(by='Valor documento', ascending=False)
+            fig = px.bar(df_agrupado, x='PlanoConta', y='Valor documento', text_auto='.2s', color='PlanoConta')
+            fig.update_layout(showlegend=False, yaxis_title="Valor (R$)")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("Nenhum lançamento encontrado para este mês.")
 
     # ==========================================
     # PÁGINA 2: ANÁLISE DE CUSTOS DETALHADA
     # ==========================================
     elif pagina == "Análise de Custos Detalhada":
         st.title("🔎 Análise de Custos Detalhada")
+        
+        # 1. NOVO GRÁFICO: Evolução Mensal de Custos
+        st.subheader("📈 Evolução Mensal de Custos (Todos os Períodos)")
+        df_temporal = df.groupby(['Ano', 'Mês'])['Valor documento'].sum().reset_index()
+        df_temporal = df_temporal.sort_values(by=['Ano', 'Mês'])
+        # Cria a coluna de Período (ex: Janeiro/2026)
+        df_temporal['Período'] = df_temporal['Mês'].map(MESES_NOMES).astype(str) + "/" + df_temporal['Ano'].astype(str)
+        
+        fig_linha = px.bar(df_temporal, x='Período', y='Valor documento', text_auto='.2s', title="Custo Total Lançado por Mês")
+        fig_linha.update_layout(yaxis_title="Valor Lançado (R$)", xaxis_title="Mês / Ano")
+        st.plotly_chart(fig_linha, use_container_width=True)
+        
+        st.divider()
+        
+        # 2. Análise Completa por Categorias
+        st.subheader("🧩 Representatividade por Categoria (Global)")
+        total_doc_global = df['Valor documento'].sum()
+        
         df_custos = df.groupby('PlanoConta')['Valor documento'].sum().reset_index()
         df_custos = df_custos.sort_values(by='Valor documento', ascending=False)
-        df_custos['% do Orçamento'] = (df_custos['Valor documento'] / orcamento_mensal) * 100
-        df_custos['% do Total Gasto'] = (df_custos['Valor documento'] / total_doc) * 100
+        df_custos['% do Orçamento Mensal'] = (df_custos['Valor documento'] / orcamento_mensal) * 100
+        df_custos['% do Total Gasto'] = (df_custos['Valor documento'] / total_doc_global) * 100
         
         col_grafico, col_tabela = st.columns([1, 1.2])
         with col_grafico:
-            fig_pie = px.pie(df_custos, values='Valor documento', names='PlanoConta', title='Divisão dos Gastos (Proporção)')
+            fig_pie = px.pie(df_custos, values='Valor documento', names='PlanoConta', title='Divisão dos Gastos')
             st.plotly_chart(fig_pie, use_container_width=True)
             
         with col_tabela:
-            st.subheader("Tabela de Custos")
             df_display = df_custos.copy()
             df_display['Valor documento'] = df_display['Valor documento'].apply(formatar_moeda)
-            df_display['% do Orçamento'] = df_display['% do Orçamento'].apply(lambda x: f"{x:.2f}%")
+            df_display['% do Orçamento Mensal'] = df_display['% do Orçamento Mensal'].apply(lambda x: f"{x:.2f}%")
             df_display['% do Total Gasto'] = df_display['% do Total Gasto'].apply(lambda x: f"{x:.2f}%")
             st.dataframe(df_display, use_container_width=True, hide_index=True)
 
@@ -151,12 +192,9 @@ if not df.empty:
             
             if salvar:
                 df['Situação pagamento documento'] = df_editado['Situação pagamento documento']
-                
-                # Regra: Se for BAIXA AUTOMÁTICA ou BAIXA MANUAL, conta como pago.
                 pagos_mask = df['Situação pagamento documento'].isin(["BAIXA AUTOMÁTICA", "BAIXA MANUAL"])
                 df.loc[pagos_mask, 'Valor pago'] = df['Valor documento']
                 df.loc[~pagos_mask, 'Valor pago'] = 0.0
-                
                 st.session_state['df_dados'] = df
                 st.success("✅ Atualização concluída!")
                 st.rerun()
@@ -171,9 +209,7 @@ if not df.empty:
     # ==========================================
     elif pagina == "Relatório Analítico (Mensal/Anual)":
         st.title("📅 Relatório Analítico de Lançamentos")
-        st.markdown("Filtre os dados por período para avaliar as contas e visualizar as informações completas.")
-        
-        meses_nomes = {1: 'Janeiro', 2: 'Fevereiro', 3: 'Março', 4: 'Abril', 5: 'Maio', 6: 'Junho', 7: 'Julho', 8: 'Agosto', 9: 'Setembro', 10: 'Outubro', 11: 'Novembro', 12: 'Dezembro'}
+        st.markdown("Filtre os dados por período e flegue os status desejados.")
         
         col_filtro1, col_filtro2, col_filtro3 = st.columns(3)
         
@@ -181,12 +217,15 @@ if not df.empty:
         ano_selecionado = col_filtro1.selectbox("Selecione o Ano", ["Todos"] + anos_disponiveis)
         
         meses_disponiveis = sorted(df['Mês'].dropna().unique().tolist())
-        meses_opcoes = ["Todos"] + [meses_nomes.get(m, str(m)) for m in meses_disponiveis]
+        meses_opcoes = ["Todos"] + [MESES_NOMES.get(m, str(m)) for m in meses_disponiveis]
         mes_selecionado = col_filtro2.selectbox("Selecione o Mês", meses_opcoes)
         
-        # Filtro com os status exatos da planilha
-        filtros_situacao = ["Todos os Lançamentos"] + STATUS_ORIGINAIS
-        situacao_selecionada = col_filtro3.selectbox("Filtro de Situação", filtros_situacao)
+        # Filtro de Situação em Formato de Múltipla Escolha (Flegar)
+        situacoes_selecionadas = col_filtro3.multiselect(
+            "Filtre por Situação (Pode escolher mais de uma):", 
+            options=STATUS_ORIGINAIS,
+            default=STATUS_ORIGINAIS # Por padrão, todas vêm selecionadas
+        )
         
         df_filtrado = df.copy()
         
@@ -194,11 +233,15 @@ if not df.empty:
             df_filtrado = df_filtrado[df_filtrado['Ano'] == ano_selecionado]
             
         if mes_selecionado != "Todos":
-            mes_numero = [k for k, v in meses_nomes.items() if v == mes_selecionado][0]
+            mes_numero = [k for k, v in MESES_NOMES.items() if v == mes_selecionado][0]
             df_filtrado = df_filtrado[df_filtrado['Mês'] == mes_numero]
             
-        if situacao_selecionada != "Todos os Lançamentos":
-            df_filtrado = df_filtrado[df_filtrado['Situação pagamento documento'] == situacao_selecionada]
+        # Aplica o filtro múltiplo de situação
+        if situacoes_selecionadas:
+            df_filtrado = df_filtrado[df_filtrado['Situação pagamento documento'].isin(situacoes_selecionadas)]
+        else:
+            # Se ele desmarcar tudo, não mostra nada
+            df_filtrado = df_filtrado.iloc[0:0] 
             
         st.divider()
         st.subheader(f"Resultados do Período ({len(df_filtrado)} lançamentos encontrados)")
