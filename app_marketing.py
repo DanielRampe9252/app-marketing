@@ -185,7 +185,7 @@ if not df.empty:
             col_c, col_d = st.columns(2)
             lista_contas = df['PlanoConta'].dropna().unique().tolist()
             plano_conta = col_c.selectbox("Plano de Contas", lista_contas)
-            valor_novo = col_d.number_input("Valor da Despesa (R$)", min_value=0.0, format="%.2f")
+            valor_novo = col_d.number_input("Valor da Despesa (R$)", min_value=0.0, format="% . 2f")
             
             col_e, col_f = st.columns(2)
             data_venc = col_e.date_input("Data de Vencimento")
